@@ -29,7 +29,7 @@
 
 # TODO ensure user-provided palette and palette sharing works as intended
 
-import struct
+import math, struct
 
 import png
 import libimagequant
@@ -135,6 +135,25 @@ def color_quant(texels, width, height, num, dither_lvl=0.5): # TODO adjust defau
     pal.texels = quant_colors
     return quant_idxs, pal
 
+def all_factors(n):
+    """
+    Compute all ordered integer pairs that multiply to produce `n`.
+    """
+    factorizations = [(n,1)]
+    for i in range(2, int(math.sqrt(n))+1):
+        div = n // i
+        if div * i == n:
+            factorizations.append((div,i))
+    return factorizations
+
+def palette_dim(count):
+    """
+    Returns an image width and height for a palette containing `count` texels
+    """
+    factorizations = all_factors(count)
+    width, height = min([(a-b,a,b) for a,b in factorizations], key=lambda X: X[0])[1:]
+    return width, height
+
 def png_to_data(file):
     png_reader = png.Reader(filename=file)
 
@@ -216,8 +235,6 @@ class Image:
             pal = Image.new(dim, dim, pal_fmt, G_IM_SIZ_16b, None)
             pal.texels = palette_data
 
-        print(palette_data)
-
         # create image
         width = png_data[0]
         height = png_data[1]
@@ -256,19 +273,11 @@ class Image:
         Reads a palette from binary data.
         """
         exception_if_not(count <= 256, ValueError, "Maximum palette size is 256 colors")
-
-        dim = 16 if count > 16 else 4
-        tlut_square_count = dim * dim # 256 or 16
-        tlut_target_bytes = int(G_SIZ_BYTES(G_IM_SIZ_16b) * tlut_square_count)
-
-        # can this be avoided (probably not)
-        data.extend([0] * (tlut_target_bytes - len(data)))
-
-        assert len(data) == tlut_target_bytes, \
-               f"[INTERNAL ERROR] Palette target size did not match actual size {tlut_target_bytes} {len(data)}"
-
+        data = data[:G_SIZ_BYTES(G_IM_SIZ_16b) * count]
+        # compute palette dimensions, tries to get as close to a square shape as possible
+        width, height = palette_dim(count)
         # create
-        return Image.from_bin(data, dim, dim, fmt, G_IM_SIZ_16b, None)
+        return Image.from_bin(data, width, height, fmt, G_IM_SIZ_16b, None)
 
     @staticmethod
     def from_bin(data, width, height, fmt, siz, pal, preswapped=False):
@@ -484,7 +493,7 @@ class Image:
                 self.width, self.height, greyscale=False, alpha=has_alpha, bitdepth=8, palette=palette
             ).write_array(outfile, img)
 
-    def to_bin(self, preswap=False):
+    def to_bin(self, pad_to_8byte=False, preswap=False):
         """
         Write to binary.
         """
@@ -493,6 +502,15 @@ class Image:
 
         # Convert to target format
         enc = self.encode()
+
+        # Maybe pad to 8 bytes
+        texel_size = G_SIZ_BYTES(self.siz)
+        prepad_size = int(len(enc) * texel_size)
+        if pad_to_8byte and prepad_size % 8 != 0:
+            pad_amount_bytes = ((prepad_size + 7) & ~7) - prepad_size
+            pad_amount_texels = int(pad_amount_bytes / texel_size)
+            pad_texel = self.pack(0x00, 0x00, 0x00, 0xFF)
+            enc.extend([pad_texel] * pad_amount_texels)
 
         # Pack texels
         data = bytearray()
@@ -506,11 +524,11 @@ class Image:
         # TODO implement dxt=0 word swapping
         return data
 
-    def to_c(self, preswap=False):
+    def to_c(self, pad_to_8byte=False, preswap=False):
         """
         Write C array body (bytes)
         """
-        data = self.to_bin(preswap)
+        data = self.to_bin(pad_to_8byte, preswap)
 
         c_out = ""
         for i,b in enumerate(data,1):
